@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="在庫チェック">
+  <meta name="theme-color" content="#ffffff">
+  <title>在庫チェック</title>
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="icon" type="image/png" href="icon-192.png">
+  <style>
+    :root {
+      --bg: #f4f5f7;
+      --card: #ffffff;
+      --text: #1f2328;
+      --sub: #6b7280;
+      --need-bg: #ffe4ea;
+      --need-border: #f19bb0;
+      --need-text: #c2264f;
+      --accent: #1f2328;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; background: var(--bg); color: var(--text); }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", "Yu Gothic", sans-serif;
+      padding-bottom: calc(24px + env(safe-area-inset-bottom));
+    }
+    button { font: inherit; color: inherit; touch-action: manipulation; cursor: pointer; }
+
+    header {
+      position: sticky; top: 0; z-index: 10;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.06);
+      padding: calc(10px + env(safe-area-inset-top)) 12px 10px;
+    }
+    .title-row { display: flex; align-items: center; justify-content: space-between; }
+    h1 { font-size: 20px; margin: 0 4px; }
+    .icon-btn {
+      width: 44px; height: 44px; border: none; border-radius: 22px;
+      background: transparent; font-size: 22px;
+    }
+    .icon-btn:active { background: #eceef1; }
+    .tabs { display: flex; gap: 8px; margin-top: 8px; }
+    .tab {
+      flex: 1; height: 44px; border: none; border-radius: 22px;
+      background: #eceef1; font-size: 16px; font-weight: 600;
+    }
+    .tab.active { background: var(--accent); color: #fff; }
+    .badge {
+      display: inline-block; min-width: 22px; padding: 0 6px; margin-left: 6px;
+      border-radius: 11px; background: var(--need-text); color: #fff;
+      font-size: 13px; line-height: 22px;
+    }
+    .badge.zero { background: #b8bec7; }
+
+    .hint { margin: 12px 16px 0; font-size: 13px; color: var(--sub); }
+    h2 {
+      display: flex; align-items: center; gap: 6px;
+      margin: 20px 16px 8px; font-size: 15px; color: var(--sub); font-weight: 700;
+    }
+
+    .card {
+      display: flex; align-items: center;
+      min-height: 64px; margin: 0 12px 8px;
+      background: var(--card); border: 2px solid transparent; border-radius: 16px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+      transition: background-color 0.15s, border-color 0.15s;
+    }
+    .card.need { background: var(--need-bg); border-color: var(--need-border); }
+    .main {
+      flex: 1; min-height: 60px; display: flex; align-items: center; gap: 8px;
+      padding: 0 8px 0 16px; border: none; background: transparent; text-align: left;
+    }
+    .name { font-size: 18px; font-weight: 600; }
+    .state {
+      margin-left: auto; padding: 2px 10px; border-radius: 12px;
+      font-size: 13px; font-weight: 700; white-space: nowrap;
+      background: #e8f5e9; color: #2e7d32;
+    }
+    .card.need .state { background: var(--need-text); color: #fff; }
+    .stepper { display: flex; align-items: center; padding-right: 8px; }
+    .step {
+      width: 44px; height: 44px; border-radius: 22px; border: 1.5px solid #d4d8de;
+      background: #fff; font-size: 22px; line-height: 1;
+    }
+    .step:active { background: #eceef1; }
+    .step:disabled { opacity: 0.35; }
+    .count { width: 34px; text-align: center; font-size: 20px; font-weight: 700; }
+    .count.empty { color: #b8bec7; }
+
+    .empty-msg { margin: 48px 16px; text-align: center; font-size: 17px; color: var(--sub); }
+    .toast {
+      position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom));
+      transform: translateX(-50%); max-width: calc(100% - 32px);
+      padding: 12px 18px; border-radius: 12px; background: rgba(31, 35, 40, 0.92); color: #fff;
+      font-size: 15px; opacity: 0; pointer-events: none; transition: opacity 0.2s;
+    }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="title-row">
+      <h1>在庫チェック</h1>
+      <button class="icon-btn" id="reload" aria-label="最新にする">🔄</button>
+    </div>
+    <div class="tabs">
+      <button class="tab active" id="tab-all">全部</button>
+      <button class="tab" id="tab-buy">買うもの<span class="badge zero" id="badge">0</span></button>
+    </div>
+  </header>
+  <main id="list"><p class="empty-msg">読み込み中…</p></main>
+  <div class="toast" id="toast"></div>
+
+  <script>
+    var ICONS = {
+      '調味料・食品': '🧂', 'キッチン用品': '🧽', 'ゴミ袋': '🗑️',
+      '洗濯': '👕', 'バス用品': '🛁', 'その他': '📦'
+    };
+    var state = null;   // { categories: [...], items: [{row, name, category, need, stock}] }
+    var tab = 'all';    // 'all' | 'buy'
+    var pending = 0;    // 保存中の件数（保存中はサーバーの返事で画面を上書きしない）
+
+    // 接続先と合言葉は URL の # 以降（#u=デプロイID&k=合言葉）で受け取る。# 以降はサーバーに送られない。
+    // ホーム画面から開いたときに # が落ちても使えるよう、端末にも保存しておく。
+    var CONF = (function () {
+      var h = new URLSearchParams(location.hash.slice(1));
+      var u = h.get('u'), k = h.get('k');
+      try {
+        if (u && k) localStorage.setItem('stockConf', JSON.stringify({ u: u, k: k }));
+        else { var saved = JSON.parse(localStorage.getItem('stockConf') || 'null'); if (saved) { u = saved.u; k = saved.k; } }
+      } catch (e) { /* 保存できない端末では URL の値だけ使う */ }
+      return (u && k && /^[\w-]+$/.test(u)) ? { url: 'https://script.google.com/macros/s/' + u + '/exec', key: k } : null;
+    })();
+
+    // サーバー（Apps Script）を呼ぶ。読み取りは GET、書き込みは POST（text/plain なので事前確認なしで送れる）
+    function api(fn, args) {
+      var req;
+      if (fn === 'getState') {
+        req = fetch(CONF.url + '?action=state&key=' + encodeURIComponent(CONF.key));
+      } else {
+        var body = { key: CONF.key, action: fn, row: args[0], name: args[1] };
+        if (fn === 'setNeed') body.need = args[2]; else body.stock = args[2];
+        req = fetch(CONF.url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
+      }
+      return req.then(function (r) { return r.json(); }).then(function (res) {
+        if (!res.ok) throw new Error(res.error || '保存できませんでした');
+        return res.state;
+      });
+    }
+
+    // 受け取った直後に形をそろえる（空欄の在庫数は null。届かない・形が違う値も null / false に寄せる）
+    function normalize(s) {
+      (s.items || []).forEach(function (i) {
+        i.need = i.need === true;
+        i.stock = typeof i.stock === 'number' ? i.stock : null;
+      });
+      return s;
+    }
+
+    function el(tag, cls, text) {
+      var e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (text !== undefined) e.textContent = text;
+      return e;
+    }
+
+    function toast(msg) {
+      var t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      clearTimeout(toast.timer);
+      toast.timer = setTimeout(function () { t.classList.remove('show'); }, 2500);
+    }
+
+    function load() {
+      if (pending > 0) return Promise.resolve(false);
+      return api('getState').then(function (s) {
+        if (pending === 0) { state = normalize(s); render(); }
+        return true;
+      }).catch(function () {
+        toast('読み込めませんでした。🔄 を押してください');
+        return false;
+      });
+    }
+
+    // 保存：画面は先に変え、返事が来たら（他に保存中が無ければ）サーバーの内容で揃える
+    function save(fn, args) {
+      pending++;
+      api(fn, args).then(function (s) {
+        pending--;
+        if (pending === 0) { state = normalize(s); render(); }
+      }).catch(function (err) {
+        pending--;
+        toast((err && err.message) ? err.message : '保存できませんでした');
+        load();
+      });
+    }
+
+    function toggle(item) {
+      item.need = !item.need;
+      render();
+      save('setNeed', [item.row, item.name, item.need]);
+    }
+
+    function step(item, d) {
+      var next = item.stock === null ? (d > 0 ? 1 : 0) : Math.max(0, Math.min(5, item.stock + d));
+      if (next === item.stock) return;
+      item.stock = next;
+      render();
+      save('setStock', [item.row, item.name, next]);
+    }
+
+    function card(item) {
+      var c = el('div', 'card' + (item.need ? ' need' : ''));
+      var main = el('button', 'main');
+      main.setAttribute('aria-label', item.name + '：' + (item.need ? '切れた' : 'ある') + '（タップで切り替え）');
+      if (item.need) main.appendChild(el('span', '', '🛒'));
+      main.appendChild(el('span', 'name', item.name));
+      main.appendChild(el('span', 'state', item.need ? '切れた' : 'ある'));
+      main.onclick = function () { toggle(item); };
+      c.appendChild(main);
+
+      var st = el('div', 'stepper');
+      var minus = el('button', 'step', '－');
+      minus.setAttribute('aria-label', item.name + 'の在庫を減らす');
+      minus.disabled = item.stock === 0;
+      minus.onclick = function () { step(item, -1); };
+      var plus = el('button', 'step', '＋');
+      plus.setAttribute('aria-label', item.name + 'の在庫を増やす');
+      plus.disabled = item.stock === 5;
+      plus.onclick = function () { step(item, 1); };
+      var count = el('span', 'count' + (item.stock === null ? ' empty' : ''), item.stock === null ? '–' : String(item.stock));
+      st.appendChild(minus); st.appendChild(count); st.appendChild(plus);
+      c.appendChild(st);
+      return c;
+    }
+
+    function render() {
+      if (!state) return;
+      var list = document.getElementById('list');
+      list.textContent = '';
+      var needCount = state.items.filter(function (i) { return i.need; }).length;
+      var badge = document.getElementById('badge');
+      badge.textContent = needCount;
+      badge.className = 'badge' + (needCount === 0 ? ' zero' : '');
+      document.getElementById('tab-all').classList.toggle('active', tab === 'all');
+      document.getElementById('tab-buy').classList.toggle('active', tab === 'buy');
+
+      var shown = state.items.filter(function (i) { return tab === 'all' || i.need; });
+      if (tab === 'all') list.appendChild(el('p', 'hint', '品名をタップ → 「切れた」「ある」を切り替え。右の －／＋ で在庫数'));
+      if (shown.length === 0) {
+        list.appendChild(el('p', 'empty-msg', tab === 'buy' ? '買うものはありません 🎉' : '品目がありません'));
+        return;
+      }
+      state.categories.forEach(function (cat) {
+        var items = shown.filter(function (i) { return i.category === cat; });
+        if (items.length === 0) return;
+        var h = el('h2');
+        h.appendChild(el('span', '', ICONS[cat] || '📦'));
+        h.appendChild(el('span', '', cat));
+        list.appendChild(h);
+        items.forEach(function (i) { list.appendChild(card(i)); });
+      });
+    }
+
+    document.getElementById('tab-all').onclick = function () { tab = 'all'; render(); window.scrollTo(0, 0); };
+    document.getElementById('tab-buy').onclick = function () { tab = 'buy'; render(); window.scrollTo(0, 0); };
+    document.getElementById('reload').onclick = function () {
+      if (!CONF) return;
+      load().then(function (ok) { if (ok) toast('最新にしました'); });
+    };
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && CONF) load(); });
+    if (CONF) load();
+    else document.getElementById('list').innerHTML =
+      '<p class="empty-msg">合言葉つきの URL から開いてください。<br>（共有された URL をそのまま開く）</p>';
+  </script>
+</body>
+</html>
