@@ -92,6 +92,30 @@
     .count { width: 34px; text-align: center; font-size: 20px; font-weight: 700; }
     .count.empty { color: #b8bec7; }
 
+    .memo-form { display: flex; gap: 8px; margin: 12px 12px 4px; }
+    .memo-form[hidden] { display: none; }
+    .memo-input {
+      flex: 1; min-width: 0; height: 48px; padding: 0 14px;
+      border: 1.5px solid #d4d8de; border-radius: 14px; background: #fff;
+      font: inherit; font-size: 17px; color: var(--text);
+    }
+    .memo-input:focus { outline: none; border-color: var(--accent); }
+    .memo-add {
+      height: 48px; padding: 0 18px; border: none; border-radius: 14px;
+      background: var(--accent); color: #fff; font-size: 16px; font-weight: 700;
+    }
+    .card.memo { background: #fff8e1; }
+    .memo-body { flex: 1; min-width: 0; padding: 10px 8px 10px 16px; }
+    .memo-text { font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+    .memo-date { margin-top: 2px; font-size: 12px; color: var(--sub); }
+    .done-btn {
+      flex: none; height: 44px; margin-right: 10px; padding: 0 14px;
+      border: 1.5px solid #d4d8de; border-radius: 22px; background: #fff;
+      font-size: 15px; font-weight: 700; white-space: nowrap;
+    }
+    .done-btn:active { background: #eceef1; }
+    .done-btn:disabled { opacity: 0.35; }
+
     .empty-msg { margin: 48px 16px; text-align: center; font-size: 17px; color: var(--sub); }
     .toast {
       position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom));
@@ -111,8 +135,15 @@
     <div class="tabs">
       <button class="tab active" id="tab-all">全部</button>
       <button class="tab" id="tab-buy">買うもの<span class="badge zero" id="badge">0</span></button>
+      <button class="tab" id="tab-memo">📝 メモ</button>
     </div>
   </header>
+  <!-- メモの入力欄は一覧の書き直し（render）の外に置き、入力中の文字とフォーカスを保つ -->
+  <form class="memo-form" id="memo-form" hidden autocomplete="off">
+    <input class="memo-input" id="memo-input" type="text" maxlength="100" enterkeyhint="done"
+           placeholder="品目に無い物（例：電池 単3）" aria-label="買い物メモ">
+    <button class="memo-add" id="memo-add" type="submit">追加</button>
+  </form>
   <main id="list"><p class="empty-msg">読み込み中…</p></main>
   <div class="toast" id="toast"></div>
 
@@ -121,8 +152,9 @@
       '調味料・食品': '🧂', 'キッチン用品': '🧽', 'ゴミ袋': '🗑️',
       '洗濯': '👕', 'バス用品': '🛁', 'その他': '📦'
     };
-    var state = null;   // { categories: [...], items: [{row, name, category, need, stock}] }
-    var tab = 'all';    // 'all' | 'buy'
+    var state = null;   // { categories: [...], items: [{row, name, category, need, stock}], memos: [{id, text, date}] }
+    var tab = 'all';    // 'all' | 'buy' | 'memo'
+    var tmpId = 0;      // 追加して保存が終わるまでのメモの仮の ID
     var pending = 0;    // 保存中の件数（保存中はサーバーの返事で画面を上書きしない）
 
     // 接続先と合言葉は URL の # 以降（#u=デプロイID&k=合言葉）で受け取る。# 以降はサーバーに送られない。
@@ -143,8 +175,13 @@
       if (fn === 'getState') {
         req = fetch(CONF.url + '?action=state&key=' + encodeURIComponent(CONF.key));
       } else {
-        var body = { key: CONF.key, action: fn, row: args[0], name: args[1] };
-        if (fn === 'setNeed') body.need = args[2]; else body.stock = args[2];
+        var body = { key: CONF.key, action: fn };
+        if (fn === 'addMemo') body.text = args[0];
+        else if (fn === 'deleteMemo') body.id = args[0];
+        else {
+          body.row = args[0]; body.name = args[1];
+          if (fn === 'setNeed') body.need = args[2]; else body.stock = args[2];
+        }
         req = fetch(CONF.url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
       }
       return req.then(function (r) { return r.json(); }).then(function (res) {
@@ -158,6 +195,9 @@
       (s.items || []).forEach(function (i) {
         i.need = i.need === true;
         i.stock = typeof i.stock === 'number' ? i.stock : null;
+      });
+      s.memos = (Array.isArray(s.memos) ? s.memos : []).filter(function (m) {
+        return m && typeof m.id === 'string' && typeof m.text === 'string';
       });
       return s;
     }
@@ -215,6 +255,34 @@
       save('setStock', [item.row, item.name, next]);
     }
 
+    function addMemo(text) {
+      text = text.trim();
+      if (!text || !state) return;
+      state.memos.push({ id: 'tmp-' + (++tmpId), text: text, date: '' });
+      render();
+      save('addMemo', [text]);
+    }
+
+    function doneMemo(memo) {
+      state.memos = state.memos.filter(function (m) { return m !== memo; });
+      render();
+      save('deleteMemo', [memo.id]);
+    }
+
+    function memoCard(memo) {
+      var c = el('div', 'card memo');
+      var body = el('div', 'memo-body');
+      body.appendChild(el('div', 'memo-text', memo.text));
+      body.appendChild(el('div', 'memo-date', memo.date ? memo.date + ' に書いた' : '保存中…'));
+      c.appendChild(body);
+      var done = el('button', 'done-btn', '✓ 買った');
+      done.setAttribute('aria-label', memo.text + 'を買った（メモを消す）');
+      done.disabled = memo.id.indexOf('tmp-') === 0; // 保存が終わるまでは消せない
+      done.onclick = function () { doneMemo(memo); };
+      c.appendChild(done);
+      return c;
+    }
+
     function card(item) {
       var c = el('div', 'card' + (item.need ? ' need' : ''));
       var main = el('button', 'main');
@@ -244,17 +312,34 @@
       if (!state) return;
       var list = document.getElementById('list');
       list.textContent = '';
-      var needCount = state.items.filter(function (i) { return i.need; }).length;
+      var needCount = state.items.filter(function (i) { return i.need; }).length + state.memos.length;
       var badge = document.getElementById('badge');
       badge.textContent = needCount;
       badge.className = 'badge' + (needCount === 0 ? ' zero' : '');
       document.getElementById('tab-all').classList.toggle('active', tab === 'all');
       document.getElementById('tab-buy').classList.toggle('active', tab === 'buy');
+      document.getElementById('tab-memo').classList.toggle('active', tab === 'memo');
+      document.getElementById('memo-form').hidden = tab !== 'memo';
+
+      if (tab === 'memo') {
+        list.appendChild(el('p', 'hint', '品目に無い物を思いついたら書いておく。「買うもの」にも出ます。買ったら ✓ で消す'));
+        if (state.memos.length === 0) list.appendChild(el('p', 'empty-msg', 'メモはありません'));
+        state.memos.forEach(function (m) { list.appendChild(memoCard(m)); });
+        return;
+      }
 
       var shown = state.items.filter(function (i) { return tab === 'all' || i.need; });
       if (tab === 'all') list.appendChild(el('p', 'hint', '品名をタップ → 「切れた」「ある」を切り替え。右の －／＋ で在庫数'));
+      if (tab === 'buy' && state.memos.length > 0) {
+        var mh = el('h2');
+        mh.appendChild(el('span', '', '📝'));
+        mh.appendChild(el('span', '', 'メモ（品目に無い物）'));
+        list.appendChild(mh);
+        state.memos.forEach(function (m) { list.appendChild(memoCard(m)); });
+      }
       if (shown.length === 0) {
-        list.appendChild(el('p', 'empty-msg', tab === 'buy' ? '買うものはありません 🎉' : '品目がありません'));
+        if (tab === 'all') list.appendChild(el('p', 'empty-msg', '品目がありません'));
+        else if (state.memos.length === 0) list.appendChild(el('p', 'empty-msg', '買うものはありません 🎉'));
         return;
       }
       state.categories.forEach(function (cat) {
@@ -270,6 +355,18 @@
 
     document.getElementById('tab-all').onclick = function () { tab = 'all'; render(); window.scrollTo(0, 0); };
     document.getElementById('tab-buy').onclick = function () { tab = 'buy'; render(); window.scrollTo(0, 0); };
+    document.getElementById('tab-memo').onclick = function () {
+      tab = 'memo'; render(); window.scrollTo(0, 0);
+      if (state) document.getElementById('memo-input').focus();
+    };
+    document.getElementById('memo-form').onsubmit = function (ev) {
+      ev.preventDefault();
+      var input = document.getElementById('memo-input');
+      if (!input.value.trim()) return;
+      addMemo(input.value);
+      input.value = '';
+      input.focus(); // 続けて書けるように入力欄に残る
+    };
     document.getElementById('reload').onclick = function () {
       if (!CONF) return;
       load().then(function (ok) { if (ok) toast('最新にしました'); });
