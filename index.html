@@ -251,6 +251,7 @@
       var next = item.stock === null ? (d > 0 ? 1 : 0) : Math.max(0, Math.min(5, item.stock + d));
       if (next === item.stock) return;
       item.stock = next;
+      if (next === 0) item.need = true; // 0 にしたら「切れた」にもする（サーバー側も同じ）
       render();
       save('setStock', [item.row, item.name, next]);
     }
@@ -329,7 +330,7 @@
       }
 
       var shown = state.items.filter(function (i) { return tab === 'all' || i.need; });
-      if (tab === 'all') list.appendChild(el('p', 'hint', '品名をタップ → 「切れた」「ある」を切り替え。右の －／＋ で在庫数'));
+      if (tab === 'all') list.appendChild(el('p', 'hint', '品名をタップ → 「切れた」「ある」を切り替え。右の －／＋ で在庫数（0 で「切れた」になる）'));
       if (tab === 'buy' && state.memos.length > 0) {
         var mh = el('h2');
         mh.appendChild(el('span', '', '📝'));
