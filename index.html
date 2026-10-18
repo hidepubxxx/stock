@@ -27,7 +27,7 @@
     html, body { margin: 0; background: var(--bg); color: var(--text); }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", "Yu Gothic", sans-serif;
-      padding-bottom: calc(24px + env(safe-area-inset-bottom));
+      padding-bottom: calc(88px + env(safe-area-inset-bottom)); /* 一番下でもお知らせ（元に戻す）に隠れない */
     }
     button { font: inherit; color: inherit; touch-action: manipulation; cursor: pointer; }
 
@@ -124,6 +124,30 @@
       font-size: 15px; opacity: 0; pointer-events: none; transition: opacity 0.2s;
     }
     .toast.show { opacity: 1; }
+    .toast.has-btn {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      width: calc(100% - 32px); max-width: 420px; pointer-events: auto; padding: 8px 8px 8px 18px;
+    }
+    .toast.has-btn span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .toast-btn {
+      flex: none; height: 40px; padding: 0 14px; border: none; border-radius: 10px;
+      background: #fff; color: var(--text); font-size: 15px; font-weight: 700;
+    }
+
+    .status { margin: 6px 4px 0; font-size: 13px; color: #8a5a00; }
+    .status[hidden] { display: none; }
+    .card.unsent { opacity: 0.6; }
+
+    .item-form { margin: 24px 12px 8px; padding: 12px; border-radius: 16px; background: #eceef1; }
+    .item-form[hidden] { display: none; }
+    .item-form-title { margin: 0 4px 8px; font-size: 15px; font-weight: 700; color: var(--sub); }
+    .item-row { display: flex; gap: 8px; margin-top: 8px; }
+    .item-select {
+      flex: 1; min-width: 0; height: 48px; padding: 0 10px;
+      border: 1.5px solid #d4d8de; border-radius: 14px; background: #fff;
+      font: inherit; font-size: 16px; color: var(--text);
+    }
+    #item-name { width: 100%; }
   </style>
 </head>
 <body>
@@ -132,67 +156,87 @@
       <h1>在庫チェック</h1>
       <button class="icon-btn" id="reload" aria-label="最新にする">🔄</button>
     </div>
+    <div class="status" id="status" hidden></div>
     <div class="tabs">
       <button class="tab active" id="tab-all">全部</button>
       <button class="tab" id="tab-buy">買うもの<span class="badge zero" id="badge">0</span></button>
       <button class="tab" id="tab-memo">📝 メモ</button>
     </div>
   </header>
-  <!-- メモの入力欄は一覧の書き直し（render）の外に置き、入力中の文字とフォーカスを保つ -->
+  <!-- 入力欄は一覧の書き直し（render）の外に置き、入力中の文字とフォーカスを保つ -->
   <form class="memo-form" id="memo-form" hidden autocomplete="off">
     <input class="memo-input" id="memo-input" type="text" maxlength="100" enterkeyhint="done"
            placeholder="品目に無い物（例：電池 単3）" aria-label="買い物メモ">
     <button class="memo-add" id="memo-add" type="submit">追加</button>
   </form>
   <main id="list"><p class="empty-msg">読み込み中…</p></main>
-  <div class="toast" id="toast"></div>
+  <form class="item-form" id="item-form" hidden autocomplete="off">
+    <p class="item-form-title">＋ 品目を追加（いつも買う物）</p>
+    <input class="memo-input" id="item-name" type="text" maxlength="30" enterkeyhint="done"
+           placeholder="品名（例：キッチンペーパー）" aria-label="追加する品名">
+    <div class="item-row">
+      <select class="item-select" id="item-cat" aria-label="カテゴリ"></select>
+      <button class="memo-add" type="submit">追加</button>
+    </div>
+  </form>
+  <div class="toast" id="toast" role="status"></div>
 
   <script>
     var ICONS = {
       '調味料・食品': '🧂', 'キッチン用品': '🧽', 'ゴミ袋': '🗑️',
       '洗濯': '👕', 'バス用品': '🛁', 'その他': '📦'
     };
-    var state = null;   // { categories: [...], items: [{row, name, category, need, stock}], memos: [{id, text, date}] }
-    var tab = 'all';    // 'all' | 'buy' | 'memo'
-    var tmpId = 0;      // 追加して保存が終わるまでのメモの仮の ID
-    var pending = 0;    // 保存中の件数（保存中はサーバーの返事で画面を上書きしない）
+    var state = null;    // { categories: [...], items: [{row, name, category, need, stock}], memos: [{id, text, date}] }
+    var tab = 'all';     // 'all' | 'buy' | 'memo'
+    var outbox = [];     // まだサーバーに届いていない操作（古い順。端末にも保存し、閉じても消えない）[{id, fn, p}]
+    var sending = null;  // 送っている最中の操作（outbox の先頭）
+    var offline = false; // 最後の通信が電波などで失敗した
+    var serverDown = false; // その失敗が、電波ではなくサーバーの不調だった
+    var fromCache = false; // 端末に残した前回の内容を表示している（まだ最新を受け取っていない）
+    var syncedAt = 0;    // サーバーの内容を最後に受け取った時刻
+    var retryTimer = null;
+
+    function lsGet(k) { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) { return null; } }
+    function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* 保存できない端末では残さない */ } }
 
     // 接続先と合言葉は URL の # 以降（#u=デプロイID&k=合言葉）で受け取る。# 以降はサーバーに送られない。
     // ホーム画面から開いたときに # が落ちても使えるよう、端末にも保存しておく。
     var CONF = (function () {
       var h = new URLSearchParams(location.hash.slice(1));
       var u = h.get('u'), k = h.get('k');
-      try {
-        if (u && k) localStorage.setItem('stockConf', JSON.stringify({ u: u, k: k }));
-        else { var saved = JSON.parse(localStorage.getItem('stockConf') || 'null'); if (saved) { u = saved.u; k = saved.k; } }
-      } catch (e) { /* 保存できない端末では URL の値だけ使う */ }
+      if (u && k) lsSet('stockConf', { u: u, k: k });
+      else { var saved = lsGet('stockConf'); if (saved) { u = saved.u; k = saved.k; } }
       return (u && k && /^[\w-]+$/.test(u)) ? { url: 'https://script.google.com/macros/s/' + u + '/exec', key: k } : null;
     })();
 
-    // サーバー（Apps Script）を呼ぶ。読み取りは GET、書き込みは POST（text/plain なので事前確認なしで送れる）
-    function api(fn, args) {
-      var req;
-      if (fn === 'getState') {
-        req = fetch(CONF.url + '?action=state&key=' + encodeURIComponent(CONF.key));
-      } else {
-        var body = { key: CONF.key, action: fn };
-        if (fn === 'addMemo') body.text = args[0];
-        else if (fn === 'deleteMemo') body.id = args[0];
-        else {
-          body.row = args[0]; body.name = args[1];
-          if (fn === 'setNeed') body.need = args[2]; else body.stock = args[2];
+    function newId() { return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+
+    // サーバー（Apps Script）を呼ぶ。読み取りは GET、書き込みは POST（text/plain なので事前確認なしで送れる）。
+    // サーバーが断った（ok:false）ときは err.server = true。それ以外の失敗は電波など（あとで送り直す）
+    function api(fn, p) {
+      var req = fn === 'state'
+        ? fetch(CONF.url + '?action=state&key=' + encodeURIComponent(CONF.key))
+        : fetch(CONF.url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify(Object.assign({ key: CONF.key, action: fn }, p)) });
+      return req.then(function (r) {
+        // 返事は来たが JSON でない＝Apps Script 側の一時的な不調（電波ではない）。送り直しは同じ
+        return r.json().catch(function () { var e = new Error('サーバーが応答しません'); e.badReply = true; throw e; });
+      }).then(function (res) {
+        if (!res || !res.ok) {
+          var e = new Error((res && res.error) || '保存できませんでした');
+          e.server = true;
+          throw e;
         }
-        req = fetch(CONF.url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
-      }
-      return req.then(function (r) { return r.json(); }).then(function (res) {
-        if (!res.ok) throw new Error(res.error || '保存できませんでした');
-        return res.state;
+        return res;
       });
     }
 
     // 受け取った直後に形をそろえる（空欄の在庫数は null。届かない・形が違う値も null / false に寄せる）
     function normalize(s) {
-      (s.items || []).forEach(function (i) {
+      s.categories = Array.isArray(s.categories) ? s.categories : [];
+      s.items = (Array.isArray(s.items) ? s.items : []).filter(function (i) { return i && typeof i.name === 'string'; });
+      s.items.forEach(function (i) {
+        i.row = typeof i.row === 'number' ? i.row : 0;
         i.need = i.need === true;
         i.stock = typeof i.stock === 'number' ? i.stock : null;
       });
@@ -209,99 +253,214 @@
       return e;
     }
 
-    function toast(msg) {
+    // 下に短く出すお知らせ。label を渡すとボタン（「元に戻す」）付きで少し長く出す
+    function toast(msg, label, fn) {
       var t = document.getElementById('toast');
-      t.textContent = msg;
+      t.textContent = '';
+      t.appendChild(el('span', '', msg));
+      if (label) {
+        var b = el('button', 'toast-btn', label);
+        b.onclick = function () { hideToast(); fn(); };
+        t.appendChild(b);
+      }
+      t.classList.toggle('has-btn', !!label);
       t.classList.add('show');
       clearTimeout(toast.timer);
-      toast.timer = setTimeout(function () { t.classList.remove('show'); }, 2500);
+      toast.timer = setTimeout(hideToast, label ? 5000 : 2500);
+    }
+    function hideToast() {
+      var t = document.getElementById('toast');
+      t.classList.remove('show', 'has-btn');
+    }
+
+    function busy() { return outbox.length > 0; }
+
+    // サーバーの内容を受け取った：画面をそれにそろえ、端末にも残す
+    function accept(res) {
+      state = normalize(res.state);
+      syncedAt = Date.now();
+      fromCache = false;
+      offline = false;
+      serverDown = false;
+      render();
     }
 
     function load() {
-      if (pending > 0) return Promise.resolve(false);
-      return api('getState').then(function (s) {
-        if (pending === 0) { state = normalize(s); render(); }
+      if (busy()) { flush(); return Promise.resolve(false); } // 未送信があるときは、送り終えたときの返事で最新になる
+      return api('state').then(function (res) {
+        if (!busy()) accept(res);
         return true;
-      }).catch(function () {
-        toast('読み込めませんでした。🔄 を押してください');
+      }).catch(function (err) {
+        if (!err.server) { offline = true; serverDown = !!err.badReply; }
+        render();
+        toast(state ? '読み込めませんでした（前回の内容を表示中）' : '読み込めませんでした。🔄 を押してください');
         return false;
       });
     }
 
-    // 保存：画面は先に変え、返事が来たら（他に保存中が無ければ）サーバーの内容で揃える
-    function save(fn, args) {
-      pending++;
-      api(fn, args).then(function (s) {
-        pending--;
-        if (pending === 0) { state = normalize(s); render(); }
-      }).catch(function (err) {
-        pending--;
-        toast((err && err.message) ? err.message : '保存できませんでした');
-        load();
+    // 操作を順番に1つずつ送る。電波で失敗したら残しておき、つながったら（15秒ごと・画面に戻ったとき）送り直す。
+    // サーバーが断った操作（品目の並びが変わった など）は捨てて、最新を読み直す
+    function flush() {
+      clearTimeout(retryTimer);
+      if (!CONF || sending || outbox.length === 0) return;
+      var op = outbox[0];
+      sending = op;
+      api(op.fn, op.p).then(function (res) {
+        sending = null;
+        outbox.shift();
+        saveOutbox();
+        offline = false;
+        serverDown = false;
+        op.prev = res.prev || null;
+        if (op.wantUndo) { op.wantUndo = false; queueRestore(op); }
+        if (outbox.length === 0) accept(res); else { render(); flush(); }
+      }, function (err) {
+        sending = null;
+        if (!err.server) {
+          offline = true;
+          serverDown = !!err.badReply;
+          render();
+          retryTimer = setTimeout(flush, 15000);
+          return;
+        }
+        outbox.shift();
+        saveOutbox();
+        toast(err.message);
+        if (outbox.length === 0) load(); else flush();
       });
     }
 
-    function toggle(item) {
-      item.need = !item.need;
+    function saveOutbox() {
+      lsSet('stockOutbox', outbox.map(function (o) { return { id: o.id, fn: o.fn, p: o.p }; }));
+    }
+
+    // 画面は先に変え、操作を送る列に足す
+    function enqueue(fn, p) {
+      var op = { id: newId(), fn: fn, p: p };
+      outbox.push(op);
+      saveOutbox();
       render();
-      save('setNeed', [item.row, item.name, item.need]);
+      flush();
+      return op;
+    }
+
+    // 「元に戻す」付きのお知らせ。まだ送っていなければ取り消すだけ、送ったあとなら元の値を書き戻す
+    function offerUndo(msg, op, revert) {
+      toast(msg, '元に戻す', function () {
+        revert();
+        render();
+        var i = outbox.indexOf(op);
+        if (i >= 0 && sending !== op) { outbox.splice(i, 1); saveOutbox(); render(); return; }
+        if (sending === op && op.fn !== 'deleteMemo') { op.wantUndo = true; return; } // 返事（前の値）が届いてから戻す
+        queueRestore(op);
+      });
+    }
+
+    function queueRestore(op) {
+      if (op.fn === 'deleteMemo') { enqueue('addMemo', { text: op.memo.text, id: op.p.id }); return; }
+      if (!op.prev) { toast('元に戻せませんでした。もう一度押してください'); load(); return; }
+      enqueue('restore', { row: op.p.row, name: op.p.name, prev: op.prev });
+    }
+
+    function findItem(row, name) {
+      return state && state.items.filter(function (i) { return i.row === row && i.name === name; })[0];
+    }
+
+    function toggle(item) {
+      if (!item.row) return;
+      var row = item.row, name = item.name, before = { need: item.need, stock: item.stock };
+      item.need = !item.need;
+      var op = enqueue('setNeed', { row: row, name: name, need: item.need });
+      offerUndo(name + '：' + (item.need ? '切れた' : 'ある'), op, function () {
+        var it = findItem(row, name);
+        if (it) { it.need = before.need; it.stock = before.stock; }
+      });
     }
 
     function step(item, d) {
+      if (!item.row) return;
       var next = item.stock === null ? (d > 0 ? 1 : 0) : Math.max(0, Math.min(5, item.stock + d));
       if (next === item.stock) return;
+      var row = item.row, name = item.name, before = { need: item.need, stock: item.stock };
       item.stock = next;
       if (next === 0) item.need = true; // 0 にしたら「切れた」にもする（サーバー側も同じ）
-      render();
-      save('setStock', [item.row, item.name, next]);
+      var op = enqueue('setStock', { row: row, name: name, stock: next });
+      offerUndo(name + '：在庫 ' + next + (next === 0 ? '（切れた）' : ''), op, function () {
+        var it = findItem(row, name);
+        if (it) { it.need = before.need; it.stock = before.stock; }
+      });
     }
 
     function addMemo(text) {
       text = text.trim();
       if (!text || !state) return;
-      state.memos.push({ id: 'tmp-' + (++tmpId), text: text, date: '' });
-      render();
-      save('addMemo', [text]);
+      var id = newId();
+      state.memos.push({ id: id, text: text, date: '' });
+      enqueue('addMemo', { text: text, id: id });
     }
 
     function doneMemo(memo) {
+      var at = state.memos.indexOf(memo);
       state.memos = state.memos.filter(function (m) { return m !== memo; });
-      render();
-      save('deleteMemo', [memo.id]);
+      var op = enqueue('deleteMemo', { id: memo.id });
+      op.memo = memo;
+      offerUndo('「' + memo.text + '」を消しました', op, function () {
+        if (state.memos.some(function (m) { return m.id === memo.id; })) return;
+        state.memos.splice(Math.min(Math.max(at, 0), state.memos.length), 0, memo);
+      });
     }
 
+    function addItem(name, category) {
+      name = name.trim();
+      if (!name || !state) return false;
+      if (state.items.some(function (i) { return i.name === name; })) { toast('「' + name + '」はもうあります'); return false; }
+      state.items.push({ row: 0, name: name, category: category, need: false, stock: null });
+      enqueue('addItem', { name: name, category: category });
+      toast('「' + name + '」を追加しました');
+      return true;
+    }
+
+    function memoUnsent(id) {
+      return outbox.some(function (o) { return o.fn === 'addMemo' && o.p.id === id; });
+    }
+
+    function pendingLabel() { return offline ? '未送信' : '保存中…'; }
+
     function memoCard(memo) {
-      var c = el('div', 'card memo');
+      var unsent = memoUnsent(memo.id);
+      var c = el('div', 'card memo' + (unsent ? ' unsent' : ''));
       var body = el('div', 'memo-body');
       body.appendChild(el('div', 'memo-text', memo.text));
-      body.appendChild(el('div', 'memo-date', memo.date ? memo.date + ' に書いた' : '保存中…'));
+      body.appendChild(el('div', 'memo-date', unsent || !memo.date ? pendingLabel() : memo.date + ' に書いた'));
       c.appendChild(body);
       var done = el('button', 'done-btn', '✓ 買った');
       done.setAttribute('aria-label', memo.text + 'を買った（メモを消す）');
-      done.disabled = memo.id.indexOf('tmp-') === 0; // 保存が終わるまでは消せない
+      done.disabled = unsent; // 届くまでは消せない
       done.onclick = function () { doneMemo(memo); };
       c.appendChild(done);
       return c;
     }
 
     function card(item) {
-      var c = el('div', 'card' + (item.need ? ' need' : ''));
+      var unsent = !item.row; // 追加したばかりで、まだ行が決まっていない
+      var c = el('div', 'card' + (item.need ? ' need' : '') + (unsent ? ' unsent' : ''));
       var main = el('button', 'main');
       main.setAttribute('aria-label', item.name + '：' + (item.need ? '切れた' : 'ある') + '（タップで切り替え）');
       if (item.need) main.appendChild(el('span', '', '🛒'));
       main.appendChild(el('span', 'name', item.name));
-      main.appendChild(el('span', 'state', item.need ? '切れた' : 'ある'));
+      main.appendChild(el('span', 'state', unsent ? pendingLabel() : (item.need ? '切れた' : 'ある')));
+      main.disabled = unsent;
       main.onclick = function () { toggle(item); };
       c.appendChild(main);
 
       var st = el('div', 'stepper');
       var minus = el('button', 'step', '－');
       minus.setAttribute('aria-label', item.name + 'の在庫を減らす');
-      minus.disabled = item.stock === 0;
+      minus.disabled = unsent || item.stock === 0;
       minus.onclick = function () { step(item, -1); };
       var plus = el('button', 'step', '＋');
       plus.setAttribute('aria-label', item.name + 'の在庫を増やす');
-      plus.disabled = item.stock === 5;
+      plus.disabled = unsent || item.stock === 5;
       plus.onclick = function () { step(item, 1); };
       var count = el('span', 'count' + (item.stock === null ? ' empty' : ''), item.stock === null ? '–' : String(item.stock));
       st.appendChild(minus); st.appendChild(count); st.appendChild(plus);
@@ -309,8 +468,47 @@
       return c;
     }
 
+    function timeText(t) {
+      if (!t) return '';
+      var d = new Date(t);
+      return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + d.getHours() + ':' + ('0' + d.getMinutes()).slice(-2);
+    }
+
+    // 見出しの下の1行：未送信の件数・前回の内容を表示中か
+    function renderStatus() {
+      var s = document.getElementById('status');
+      var msg = '';
+      if (outbox.length > 0 && offline && serverDown) msg = '⚠️ サーバーが応答しません。未送信 ' + outbox.length + ' 件は自動で送り直します';
+      else if (outbox.length > 0 && offline) msg = '📡 未送信 ' + outbox.length + ' 件。つながったら自動で送ります';
+      else if (fromCache && offline) msg = '📡 つながりません。前回（' + timeText(syncedAt) + '）の内容を表示中';
+      else if (fromCache) msg = '前回（' + timeText(syncedAt) + '）の内容を表示中。最新を読み込んでいます…';
+      s.textContent = msg;
+      s.hidden = !msg;
+    }
+
+    // カテゴリの選択肢（変わったときだけ作り直し、選んでいる値を保つ）
+    function renderCategoryOptions() {
+      var sel = document.getElementById('item-cat');
+      var cats = state.categories.indexOf('その他') >= 0 ? state.categories : state.categories.concat(['その他']);
+      var key = cats.join('\n');
+      if (sel.dataset.key === key) return;
+      var cur = sel.value || 'その他';
+      sel.textContent = '';
+      cats.forEach(function (c) {
+        var o = el('option', '', (ICONS[c] || '📦') + ' ' + c);
+        o.value = c;
+        sel.appendChild(o);
+      });
+      sel.value = cats.indexOf(cur) >= 0 ? cur : 'その他';
+      sel.dataset.key = key;
+    }
+
     function render() {
+      renderStatus();
       if (!state) return;
+      // 次に開いたとき、電波が無くてもすぐ出せるよう端末に残す（操作した後の内容）
+      lsSet('stockState', { url: CONF.url, syncedAt: syncedAt, state: state });
+
       var list = document.getElementById('list');
       list.textContent = '';
       var needCount = state.items.filter(function (i) { return i.need; }).length + state.memos.length;
@@ -321,6 +519,8 @@
       document.getElementById('tab-buy').classList.toggle('active', tab === 'buy');
       document.getElementById('tab-memo').classList.toggle('active', tab === 'memo');
       document.getElementById('memo-form').hidden = tab !== 'memo';
+      document.getElementById('item-form').hidden = tab !== 'all';
+      renderCategoryOptions();
 
       if (tab === 'memo') {
         list.appendChild(el('p', 'hint', '品目に無い物を思いついたら書いておく。「買うもの」にも出ます。買ったら ✓ で消す'));
@@ -330,7 +530,7 @@
       }
 
       var shown = state.items.filter(function (i) { return tab === 'all' || i.need; });
-      if (tab === 'all') list.appendChild(el('p', 'hint', '品名をタップ → 「切れた」「ある」を切り替え。右の －／＋ で在庫数（0 で「切れた」になる）'));
+      if (tab === 'all') list.appendChild(el('p', 'hint', '品名をタップ → 「切れた」「ある」を切り替え。右の －／＋ で在庫数（0 で「切れた」になる）。いつも買う物は一番下から追加'));
       if (tab === 'buy' && state.memos.length > 0) {
         var mh = el('h2');
         mh.appendChild(el('span', '', '📝'));
@@ -343,7 +543,10 @@
         else if (state.memos.length === 0) list.appendChild(el('p', 'empty-msg', '買うものはありません 🎉'));
         return;
       }
-      state.categories.forEach(function (cat) {
+      // サーバーが知らないカテゴリ（追加して届く前の品目など）も最後に出す
+      var cats = state.categories.slice();
+      shown.forEach(function (i) { if (cats.indexOf(i.category) < 0) cats.push(i.category); });
+      cats.forEach(function (cat) {
         var items = shown.filter(function (i) { return i.category === cat; });
         if (items.length === 0) return;
         var h = el('h2');
@@ -368,14 +571,34 @@
       input.value = '';
       input.focus(); // 続けて書けるように入力欄に残る
     };
+    document.getElementById('item-form').onsubmit = function (ev) {
+      ev.preventDefault();
+      var input = document.getElementById('item-name');
+      if (addItem(input.value, document.getElementById('item-cat').value)) input.value = '';
+    };
     document.getElementById('reload').onclick = function () {
       if (!CONF) return;
+      if (busy()) { toast('未送信の ' + outbox.length + ' 件を送っています'); flush(); return; }
       load().then(function (ok) { if (ok) toast('最新にしました'); });
     };
     document.addEventListener('visibilitychange', function () { if (!document.hidden && CONF) load(); });
-    if (CONF) load();
-    else document.getElementById('list').innerHTML =
-      '<p class="empty-msg">合言葉つきの URL から開いてください。<br>（共有された URL をそのまま開く）</p>';
+    window.addEventListener('online', function () { if (CONF) load(); });
+
+    if (CONF) {
+      // 前回の内容と未送信の操作を端末から戻し、すぐ表示してから最新を取りに行く
+      outbox = (lsGet('stockOutbox') || []).filter(function (o) { return o && typeof o.fn === 'string' && o.p && typeof o.p === 'object'; });
+      var cached = lsGet('stockState');
+      if (cached && cached.url === CONF.url && cached.state) {
+        state = normalize(cached.state);
+        syncedAt = cached.syncedAt || 0;
+        fromCache = true;
+        render();
+      }
+      load();
+    } else {
+      document.getElementById('list').innerHTML =
+        '<p class="empty-msg">合言葉つきの URL から開いてください。<br>（共有された URL をそのまま開く）</p>';
+    }
   </script>
 </body>
 </html>
